@@ -1,0 +1,6 @@
+id=hotspot_smb
+name=Hotspot + SMB on boot
+version=1.0
+versionCode=1
+author=tony
+description=Turns on the Wi-Fi hotspot at boot and starts a Samba (smbd) share.

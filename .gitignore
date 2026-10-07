@@ -1,0 +1,15 @@
+# Real credentials: never commit. Use config.example.sh as the template.
+config.sh
+.passwords
+sms.conf
+panel_pass
+
+# Rebuildable artefacts (python3 -I fetch-samba.py / make-bundle.sh, install.sh)
+termux-prefix/
+prefix.tar.gz
+*.zip
+*.deb
+
+# Editors / OS
+*.swp
+.DS_Store

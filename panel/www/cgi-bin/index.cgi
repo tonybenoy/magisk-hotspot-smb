@@ -34,7 +34,7 @@ if [ "$REQUEST_METHOD" = POST ]; then
       case "$SVC" in
         samba) pkill -x smbd; pkill -x nmbd ;;
         transmission) pkill -f "[t]ransmission-daemon" ;;
-        ssh) pkill -x sshd ;;
+        ssh) pkill -f "[s]shd -f /data/local/tmp/ssh/sshd_config" ;;
         syncthing) pkill -f "[s]yncthing serve" ;;
         unbound) pkill -9 -x unbound ;;
         proxy) pkill -f "[n]ginx" ;;
@@ -77,6 +77,11 @@ if [ "$REQUEST_METHOD" = POST ]; then
     smstest)
       if ( . "$MODDIR/lib.sh"; [ -n "$SMS_TO" ] && sms_alert "Test message from the panel." ); then echo "Test SMS sent." > "$MSG"
       else echo "Test SMS FAILED or no number set. See the watchdog log below." > "$MSG"; fi ;;
+    keepon)
+      case "$(field val)" in
+        on) rm -f /data/adb/hotspot_smb/hotspot.off; echo "Hotspot is kept on: it is restarted within ~10 s if Android turns it off." > "$MSG" ;;
+        off) mkdir -p /data/adb/hotspot_smb; touch /data/adb/hotspot_smb/hotspot.off; echo "Keep-on disabled: the module will leave the hotspot alone when it is turned off." > "$MSG" ;;
+      esac ;;
     restartall) detach sh "$MODDIR/service.sh"; echo "Restarting everything (takes ~1 min)..." > "$MSG" ;;
     reboot) ( sleep 3; reboot ) >/dev/null 2>&1 & echo "Rebooting now. The panel is back after unlock + boot." > "$MSG" ;;
     passwd)
@@ -109,7 +114,7 @@ if [ -s "$MSG" ]; then echo "<div class=msg><pre style='background:none;margin:0
 
 # --- links & addresses
 cfg() { v=$(sed -n "s/^$1=\"\([^\"]*\)\".*/\1/p" "$MODDIR/config.sh" 2>/dev/null | tail -1); [ -n "$v" ] || v=$(sed -n "s/^$1=\([^ \"#]*\).*/\1/p" "$MODDIR/config.sh" 2>/dev/null | tail -1); echo "${v:-$2}"; }
-DOM=$(cfg HOTSPOT_DOMAIN lan); HIP=$(cfg HOTSPOT_IP ""); TRP=$(cfg TR_PORT 9091); STP=$(cfg ST_PORT 8384); SSP=$(cfg SSH_PORT 8022)
+DOM=$(cfg HOTSPOT_DOMAIN lan); HIP=$(cfg HOTSPOT_IP ""); TRP=$(cfg TR_PORT 9091); STP=$(cfg ST_PORT 8384); SSP=$(cfg SSH_PORT 22)
 PNP=$(cfg PANEL_PORT 8080); SMBS=$(cfg SHARE_NAME share)
 PUB=/data/local/tmp/panel_pubip
 if [ ! -s "$PUB" ] || [ -n "$(find "$PUB" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
@@ -124,15 +129,17 @@ done
 echo "<tr><td>Public (internet)</td><td><code>$PUBIP</code></td><td><small>as seen from outside, cached 10 min; behind carrier NAT it is shared</small></td></tr>"
 echo "</table>"
 H=${HIP:-$HOST}
+DNSON=$(cfg ENABLE_UNBOUND 0)
+N() { if [ "$DNSON" = 1 ]; then echo "$1"; else echo "<small>(local DNS is off)</small>"; fi; }
 echo "<h2>Links</h2><table><tr><th>Service</th><th>By name</th><th>By IP ($H)</th></tr>"
 lrow() { printf '<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n' "$1" "$2" "$3"; }
-lrow "This panel" "<a href='http://panel.$DOM/'>panel.$DOM</a>" "<a href='http://$H:$PNP/'>$H:$PNP</a>"
-lrow "Transmission (torrents)" "<a href='http://torrent.$DOM/'>torrent.$DOM</a>" "<a href='http://$H:$TRP/'>$H:$TRP</a>"
-lrow "Syncthing" "<a href='http://sync.$DOM/'>sync.$DOM</a>" "<a href='http://$H:$STP/'>$H:$STP</a>"
-lrow "Files (Samba)" "<code>\\\\phone.$DOM\\$SMBS</code>" "<code>\\\\$H\\$SMBS</code>"
-lrow "Torrent downloads (Samba)" "<code>\\\\phone.$DOM\\torrents</code>" "<code>\\\\$H\\torrents</code>"
-lrow "SSH" "<code>ssh -p $SSP root@phone.$DOM</code>" "<code>ssh -p $SSP root@$H</code>"
-lrow "DNS server" "" "<code>$H</code> (answers <code>*.$DOM</code>)"
+lrow "This panel" "$(N "<a href='http://panel.$DOM/'>panel.$DOM</a>")" "<a href='http://$H/'>$H</a> &nbsp;<small>(also :$PNP)</small>"
+lrow "Transmission (torrents)" "$(N "<a href='http://torrent.$DOM/'>torrent.$DOM</a>")" "<a href='http://$H/transmission/web/'>$H/transmission/web/</a> &nbsp;<small>(also :$TRP)</small>"
+lrow "Syncthing" "$(N "<a href='http://sync.$DOM/'>sync.$DOM</a>")" "<a href='http://$H:$STP/'>$H:$STP</a>"
+lrow "Files (Samba)" "$(N "<code>\\\\phone.$DOM\\$SMBS</code>")" "<code>\\\\$H\\$SMBS</code>"
+lrow "Torrent downloads (Samba)" "$(N "<code>\\\\phone.$DOM\\torrents</code>")" "<code>\\\\$H\\torrents</code>"
+lrow "SSH" "$(N "<code>ssh -p $SSP root@phone.$DOM</code>")" "<code>ssh -p $SSP root@$H</code>"
+[ "$DNSON" = 1 ] && lrow "DNS server" "" "<code>$H</code> (answers <code>*.$DOM</code>)"
 ip link show wg0 >/dev/null 2>&1 && lrow "WireGuard" "" "<code>$(ip -o -4 addr show wg0 | awk '{split($4,a,"/"); print a[1]}')</code>"
 echo "</table>"
 
@@ -155,10 +162,10 @@ row() { # name label running-flag link
 }
 echo "<h2>Services</h2><table>"
 f=0; up ' smbd$' && f=1;                    row samba "Samba + NetBIOS" $f ""
-f=0; up ' transmission-daemon$' && f=1;      row transmission "Transmission" $f "http://torrent.lan/"
-f=0; up ' syncthing$' && f=1;                row syncthing "Syncthing" $f "http://sync.lan/"
+f=0; up ' transmission-daemon$' && f=1;      row transmission "Transmission" $f "http://$H:$TRP/"
+f=0; up ' syncthing$' && f=1;                row syncthing "Syncthing" $f "http://$H:$STP/"
 f=0; up ' sshd$' && f=1;                     row ssh "SSH" $f ""
-f=0; up ' unbound$' && f=1;                  row unbound "DNS (unbound)" $f ""
+[ "$DNSON" = 1 ] && { f=0; up ' unbound$' && f=1; row unbound "DNS (unbound)" $f ""; }
 f=0; up ' nginx(\.conf)?$' && f=1;                    row proxy "Web proxy (nginx)" $f ""
 f=0; upargs '[u]dhcpd' && f=1;               row network "DHCP + internet sharing" $f ""
 f=0; ip link show wg0 >/dev/null 2>&1 && f=1; row wg "WireGuard" $f ""
@@ -167,6 +174,8 @@ f=0; upargs '[s]ms.s[h]' && f=1;             row sms "SMS commands" $f ""
 echo "</table>"
 if [ -e /data/adb/hotspot_smb/watchdog.off ]; then WDS="<b class=down>PAUSED</b> <button name=val value=on>resume watchdog</button>"; else WDS="<b class=up>active</b> <button name=val value=off>pause watchdog</button>"; fi
 echo "<p><form method=post><input type=hidden name=token value=\"$TOKEN\"><input type=hidden name=action value=wd>Watchdog: $WDS</form></p>"
+if [ -e /data/adb/hotspot_smb/hotspot.off ]; then KOS="<b class=down>off</b> <button name=val value=on>keep hotspot on</button>"; else KOS="<b class=up>on</b> <button name=val value=off onclick=\"return confirm('Let the hotspot stay off when it is turned off?')\">allow it to stay off</button>"; fi
+echo "<p><form method=post><input type=hidden name=token value=\"$TOKEN\"><input type=hidden name=action value=keepon>Keep hotspot on (restart if Android turns it off): $KOS</form></p>"
 echo "<p><form method=post><input type=hidden name=token value=\"$TOKEN\"><button name=action value=restartall>Restart everything</button> <button name=action value=reboot class=danger onclick=\"return confirm('Reboot the phone?')\">Reboot phone</button></form></p>"
 FREQ=$(dumpsys wifi 2>/dev/null | grep -o 'frequency= *[0-9]*' | grep -v 'frequency= *0$' | head -1 | tr -dc '0-9')
 if [ -z "$FREQ" ]; then CUR="off"; elif [ "$FREQ" -lt 3000 ]; then CUR="2.4 GHz (ch. $(( (FREQ - 2407) / 5 )))"; else CUR="5 GHz ($FREQ MHz)"; fi
@@ -204,9 +213,9 @@ HTML
 
 # --- logs
 echo "<h2>Logs</h2><p>"
-for l in module watchdog nat transmission syncthing unbound dhcp actions; do echo "<a href='?log=$l'>$l</a> "; done; echo "</p>"
+for l in module watchdog sms nat transmission syncthing unbound dhcp actions; do echo "<a href='?log=$l'>$l</a> "; done; echo "</p>"
 case "$LOGSEL" in
-  module) F=/data/local/tmp/hotspot_smb.log ;; watchdog) F=/data/local/tmp/watchdog.log ;; nat) F=/data/local/tmp/nat.log ;;
+  module) F=/data/local/tmp/hotspot_smb.log ;; watchdog) F=/data/local/tmp/watchdog.log ;; sms) F=/data/local/tmp/sms_sent.log ;; nat) F=/data/local/tmp/nat.log ;;
   transmission) F=/data/local/tmp/transmission/daemon.log ;; syncthing) F=/data/local/tmp/syncthing/serve.log ;;
   unbound) F=/data/local/tmp/unbound/unbound.log ;; dhcp) F=/data/local/tmp/udhcpd.log ;; actions) F=$ALOG ;; *) F="" ;;
 esac

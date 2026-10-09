@@ -11,6 +11,7 @@ echo "=== $(date) boot ==="
 # Optional argument: run only one part (used by the web panel), e.g. `service.sh samba`
 ONLY=${1:-}
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+ap_link() { for i in ap0 swlan0 wlan2 wlan1; do ip link show "$i" >/dev/null 2>&1 && { echo "$i"; return 0; }; done; return 1; }
 DOM=${HOTSPOT_DOMAIN:-lan}   # local DNS domain: every <name>.$DOM resolves to the phone
 if [ -z "$ONLY" ]; then
   while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done
@@ -43,7 +44,7 @@ for i in 1 2 3; do
   up=0
   for w in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
     sleep 3
-    if ip -o -4 addr show | grep -qE ' (ap0|swlan0|wlan[12]) '; then up=1; break; fi
+    if [ -n "$(ap_link)" ]; then up=1; break; fi
   done
   [ "$up" = 1 ] && break
   echo "hotspot did not come up (attempt $i), stopping and retrying"
@@ -58,7 +59,7 @@ if want network; then
 HOTSPOT_DHCP=${HOTSPOT_DHCP:-1}; HOTSPOT_PREFIX=${HOTSPOT_PREFIX:-24}
 HOTSPOT_DHCP_START=${HOTSPOT_DHCP_START:-100}; HOTSPOT_DHCP_END=${HOTSPOT_DHCP_END:-200}
 if [ -n "$HOTSPOT_IP" ]; then
-  APIF=$(ip -o -4 addr show | awk '$2 ~ /^(ap0|swlan0|wlan[12])$/ {print $2; exit}')
+  APIF=$(ap_link)
   if [ -z "$APIF" ]; then
     echo "WARN: no AP interface found, fixed subnet not set"
   elif [ "$HOTSPOT_DHCP" = 1 ] && [ "$HOTSPOT_PREFIX" = 24 ]; then
@@ -68,6 +69,9 @@ if [ -n "$HOTSPOT_IP" ]; then
     iptables -C OUTPUT -o "$APIF" -p udp --sport 67 -m owner --uid-owner 1073 -j DROP 2>/dev/null \
       || iptables -I OUTPUT -o "$APIF" -p udp --sport 67 -m owner --uid-owner 1073 -j DROP
     touch /data/local/tmp/udhcpd.leases
+    if [ "${ENABLE_UNBOUND:-0}" = 1 ]; then DHCP_DNS_OPTS="opt dns $HOTSPOT_IP
+opt domain $DOM
+opt search $DOM"; else DHCP_DNS_OPTS="opt dns 1.1.1.1 8.8.8.8"; fi
     cat > /data/local/tmp/udhcpd.conf <<EOF2
 start $BASE.$HOTSPOT_DHCP_START
 end $BASE.$HOTSPOT_DHCP_END
@@ -77,9 +81,7 @@ lease_file /data/local/tmp/udhcpd.leases
 pidfile /data/local/tmp/udhcpd.pid
 opt subnet 255.255.255.0
 opt router $HOTSPOT_IP
-opt dns $HOTSPOT_IP
-opt domain $DOM
-opt search $DOM
+$DHCP_DNS_OPTS
 opt lease 86400
 EOF2
     pkill -f "[u]dhcpd" 2>/dev/null
@@ -87,7 +89,8 @@ EOF2
     echo "udhcpd serving $BASE.$HOTSPOT_DHCP_START-$HOTSPOT_DHCP_END on $APIF"
     if [ "${HOTSPOT_SHARE_INTERNET:-1}" = 1 ]; then
       pkill -f "[n]at.sh" 2>/dev/null
-      nohup sh "$MODDIR/nat.sh" "$APIF" "$BASE.0/24" "$HOTSPOT_IP" >/data/local/tmp/nat.log 2>&1 &
+      [ "$(stat -c %s /data/local/tmp/nat.log 2>/dev/null || echo 0)" -gt 100000 ] && : > /data/local/tmp/nat.log
+      nohup sh "$MODDIR/nat.sh" "$APIF" "$BASE.0/24" "$HOTSPOT_IP" "$([ "${ENABLE_UNBOUND:-0}" = 1 ] && echo 1 || echo 0)" >>/data/local/tmp/nat.log 2>&1 &
       echo "internet sharing started (log: /data/local/tmp/nat.log)"
     fi
   else
@@ -101,6 +104,7 @@ fi
 TERMUX=/data/data/com.termux/files/usr
 # /data/data and /sdcard stay encrypted until the first unlock after boot: wait for that.
 until mkdir -p "$TERMUX" 2>/dev/null && [ -d /sdcard/Download ]; do sleep 5; done
+mkdir -p "${TERMUX%/usr}/home" 2>/dev/null; chmod 700 "${TERMUX%/usr}/home" 2>/dev/null   # root's $HOME for ssh logins
 echo "storage unlocked"
 
 # Bundled Termux tree (Samba, Transmission + libs), unpacked once into the module.
@@ -195,6 +199,7 @@ fi
 PERSIST=/data/adb/hotspot_smb
 mkdir -p "$PERSIST"
 if want ssh && [ "$ENABLE_SSH" = 1 ]; then
+  SSH_PORT=${SSH_PORT:-22}
   SSH=/data/local/tmp/ssh; mkdir -p "$SSH"; chmod 700 "$SSH"
   [ -f "$SSH/host_ed25519" ] || "$TERMUX/bin/ssh-keygen" -q -t ed25519 -N "" -f "$SSH/host_ed25519"
   touch "$PERSIST/authorized_keys"; chmod 600 "$PERSIST/authorized_keys"
@@ -212,7 +217,7 @@ SetEnv PATH=$TERMUX/bin:/system/bin:/system/xbin:/data/adb/magisk
 Subsystem sftp $TERMUX/libexec/sftp-server
 EOF2
   mkdir -p "$PREFIX/var/empty"; chmod 755 "$PREFIX/var/empty"
-  pkill -x sshd 2>/dev/null
+  pkill -f "[s]shd -f /data/local/tmp/ssh/sshd_config" 2>/dev/null; sleep 1
   "$TERMUX/bin/sshd" -f "$SSH/sshd_config" && echo "sshd started on :$SSH_PORT" || echo "sshd failed"
   [ -s "$PERSIST/authorized_keys" ] || echo "WARN: $PERSIST/authorized_keys is empty, SSH login impossible until you add a key"
 fi
@@ -237,7 +242,7 @@ if want wg && [ "$ENABLE_WG" = 1 ]; then
 fi
 
 # ---- Unbound (local DNS for hotspot clients) ----
-if want unbound && [ "${ENABLE_UNBOUND:-1}" = 1 ] && [ -n "$HOTSPOT_IP" ]; then
+if want unbound && [ "${ENABLE_UNBOUND:-0}" = 1 ] && [ -n "$HOTSPOT_IP" ]; then
   UB=/data/local/tmp/unbound; mkdir -p "$UB"
   cat > "$UB/unbound.conf" <<EOF2
 server:
@@ -266,9 +271,14 @@ forward-zone:
   forward-addr: 1.1.1.1@853#cloudflare-dns.com
   forward-addr: 9.9.9.9@853#dns.quad9.net
 EOF2
-  pkill -9 -x dnsmasq 2>/dev/null; pkill -9 -x unbound 2>/dev/null; sleep 2   # Android's tether dnsmasq holds :53
-  LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/unbound" -c "$UB/unbound.conf" \
-    && echo "unbound started (*.$DOM -> $HOTSPOT_IP)" || echo "unbound failed (see $UB/unbound.log)"
+  # Android's tether dnsmasq grabs :53 and respawns with every tethering restart: kill it and retry a few times
+  ok=0
+  for t in 1 2 3 4 5 6; do
+    pkill -9 -x dnsmasq 2>/dev/null; pkill -9 -x unbound 2>/dev/null; sleep 2
+    if LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/bin/unbound" -c "$UB/unbound.conf"; then ok=1; break; fi
+    echo "unbound start attempt $t failed, retrying"
+  done
+  [ "$ok" = 1 ] && echo "unbound started (*.$DOM -> $HOTSPOT_IP)" || echo "unbound failed (see $UB/unbound.log)"
 fi
 
 # ---- Reverse proxy: http://torrent.lan, sync.lan, panel.lan on port 80 ----
@@ -285,7 +295,9 @@ http {
   client_body_temp_path $NG/tmp_body; proxy_temp_path $NG/tmp_proxy;
   fastcgi_temp_path $NG/tmp_fcgi; uwsgi_temp_path $NG/tmp_uwsgi; scgi_temp_path $NG/tmp_scgi;
   client_max_body_size 0; proxy_read_timeout 300s;
-  server { listen 80 default_server; return 302 http://panel.$DOM/; }
+  server { listen 80 default_server;
+    location /transmission/ { proxy_pass http://127.0.0.1:${TR_PORT:-9091}; proxy_set_header Host 127.0.0.1; }
+    location / { proxy_pass http://127.0.0.1:$PANEL_PORT; proxy_set_header Host \$host; proxy_set_header Authorization \$http_authorization; } }
   server { listen 80; server_name torrent.$DOM transmission.$DOM qbit.$DOM;
     location / { proxy_pass http://127.0.0.1:${TR_PORT:-9091}; proxy_set_header Host 127.0.0.1; } }
   server { listen 80; server_name sync.$DOM syncthing.$DOM;

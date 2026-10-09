@@ -34,6 +34,7 @@ They win over `config.sh` at boot.
 | `panel/` | web panel (busybox httpd + one CGI script) |
 | `config.example.sh` | template; **`config.sh`, `.passwords`, `sms.conf` hold real secrets and are git-ignored** |
 | `install.sh`, `make-bundle.sh`, `fetch-samba.py` | PC-side tooling (flash, build the bundle) |
+| `diff-device.sh` | compare the module on the phone with this repo (hashes only; never reads `config.sh`) |
 | `prefix.tar.gz`, `termux-prefix/` | generated bundle, git-ignored |
 
 ## Services
@@ -43,7 +44,7 @@ They win over `config.sh` at boot.
 | Hotspot | on | SSID `HOTSPOT_SSID` | `HOTSPOT_PASS` (WPA2) |
 | Samba | on | `\\<ip>\share` (/sdcard), `\\<ip>\torrents` | `SMB_USER` / `SMB_PASS` |
 | Transmission | on | `http://<ip>:9091` | `TR_USER` / `TR_PASS` |
-| SSH | on (`ENABLE_SSH`) | `ssh -p 8022 root@<ip>` | key only |
+| SSH | on (`ENABLE_SSH`) | `ssh root@<ip>` (port `SSH_PORT`, default 22) | key only |
 | Syncthing | on (`ENABLE_SYNCTHING`) | `http://<ip>:8384` | `ST_USER` / `ST_PASS` |
 | WireGuard | off (`ENABLE_WG`) | tunnel from `WG_CONF` | n/a |
 | Web panel | on (`ENABLE_PANEL`) | `http://<ip>:8080` | `admin` / see below |
@@ -57,27 +58,25 @@ They win over `config.sh` at boot.
 Not covered: Windows 10/11's "Network" list (WS-Discovery) and macOS/Linux mDNS (Bonjour/Avahi),
 because Termux's repo ships no responder for them. Connect by name or by IP.
 
-### Unbound (local DNS) and friendly names
-Hotspot clients get the phone as DNS (`HOTSPOT_IP`), plus the search domain `lan`. `unbound` makes **every**
-`<anything>.lan` resolve to the phone and forwards the rest over DNS-over-TLS (Cloudflare, Quad9) with caching.
-Android's own tether `dnsmasq` is killed at start because it holds port 53.
-DHCP hands out only the phone as DNS, and `nat.sh` additionally redirects any client DNS traffic aimed at another
-server (a hardcoded `1.1.1.1`/`8.8.8.8`) to unbound, so local names work regardless of client settings. The
-Firefox DoH canary (`use-application-dns.net`) answers NXDOMAIN so Firefox keeps using this DNS. Browsers with
-"secure DNS"/DoH explicitly switched on, and phones with Private DNS set, still bypass it: turn that off for `.lan`. `ENABLE_UNBOUND=0` turns it off.
-The domain is `HOTSPOT_DOMAIN` (default `lan`). Avoid `local`: it is reserved for mDNS, and Windows, macOS and
-systemd-resolved send `.local` lookups to multicast first, so they often never ask unbound.
+### Unbound (local DNS) and friendly names: OFF by default
+`ENABLE_UNBOUND=1` makes every `<anything>.lan` resolve to the phone (`HOTSPOT_DOMAIN`, default `lan`), gives clients the
+phone as DNS plus the search domain, redirects hardcoded `1.1.1.1`/`8.8.8.8` queries to it and answers the Firefox DoH
+canary with NXDOMAIN. It is off because Android's tether `dnsmasq` fights it for port 53 and respawns on every
+tethering restart (the module kills it and retries 6 times, but this stays the flakiest part). Off: DHCP hands out
+`1.1.1.1 8.8.8.8` and you use IPs (`http://192.168.43.1:8080`). Avoid the domain `local` (mDNS clashes).
 
 ### Reverse proxy (nginx, port 80)
-Names alone don't hide ports, so `nginx` routes by host name on port 80:
+`nginx` routes by host name on port 80 (names need `ENABLE_UNBOUND=1`); `http://<phone-ip>/` always shows the panel:
 
 | URL | Goes to |
 |---|---|
 | `http://torrent.lan` (also `transmission.lan`, `qbit.lan`) | Transmission `:9091` |
 | `http://sync.lan` (`syncthing.lan`) | Syncthing `:8384` |
 | `http://panel.lan` (`phone.lan`) | Web panel `:8080` |
-| any other `*.lan` | redirects to `panel.lan` |
+| `http://<phone-ip>/transmission/web/` | Transmission, no port needed (works without DNS) |
+| anything else, incl. the bare IP | the panel |
 
+Syncthing cannot share port 80 under a path (its UI needs the site root), so it stays on `:8384` unless DNS names are on.
 Samba works by name too: `\\phone.lan\share` (or `\\PHONE\share` via NetBIOS). `ENABLE_PROXY=0` turns the proxy off.
 Plain HTTP, hotspot/WireGuard only.
 
@@ -93,7 +92,9 @@ Tested: `wg-quick up/down` works on the Moto G34; no remote client connection te
 `http://<ip>:8080` (`PANEL_PORT`), login `admin` (`PANEL_USER`). Built on busybox `httpd` + one CGI script,
 nothing extra bundled. It opens with **Addresses** (every interface's current IP: mobile data, Wi-Fi, hotspot, WireGuard, plus the public IP, looked up via api.ipify.org and cached 10 min) and **Links** (every service by name and by IP, built from `config.sh` ports/domain). It shows battery/temperature/charging, uptime, storage, addresses, service status and
 hotspot clients; it can restart or stop each service, restart everything, restart the hotspot, reboot the phone,
-change passwords (hotspot, Samba, Transmission, Syncthing, the panel itself) and show logs.
+change passwords (hotspot, Samba, Transmission, Syncthing, the panel itself), switch the hotspot band (2.4/5 GHz),
+pause the watchdog, toggle **Keep hotspot on**, configure SMS alerts, and show logs (module, watchdog, **sms** = every
+text the module sent, nat, transmission, syncthing, unbound, dhcp).
 - **Login:** user `PANEL_USER` (default `admin`), password `PANEL_PASS`, both in `config.sh`. `install.sh` replaces a
   `change-me` password with a random one and prints it. If `PANEL_PASS` is empty or missing, a random password is
   generated on first start into `/data/adb/hotspot_smb/panel_pass` (read it with
@@ -109,7 +110,7 @@ change passwords (hotspot, Samba, Transmission, Syncthing, the panel itself) and
 
 ### Watchdog and SMS
 `watchdog.sh` checks every 30 s: hotspot, fixed subnet/DHCP/NAT, Samba, Transmission, Syncthing, SSH, unbound,
-proxy, panel (and WireGuard if enabled). A service must be down for 2 checks (~60 s) before anything happens; it is
+proxy, panel (and WireGuard if enabled). A service must be down for 2 checks (~60 s) before anything happens (the hotspot and subnet get ~2 min, because `nat.sh` restarts them first); it is
 then restarted (max 3 times per 15 min). Per outage you get **one SMS when it goes down and one when it is back**
 (`SMS_NOTIFY_RECOVERY=0` in `sms.conf` drops the second), plus one-time alerts for battery >= 45 C, battery <= 15% not
 charging, and internet down for ~90 s. A hard cap of 6 SMS/hour (`SMS_MAX_PER_HOUR`) stops a flapping service
@@ -140,7 +141,17 @@ Password login is disabled. Add your public key, one per line:
     su -c "echo 'ssh-ed25519 AAAA... me' >> /data/adb/hotspot_smb/authorized_keys"
 
 This file lives outside the module, so it survives module updates. Root's shell is the bundled bash;
-`sftp` works too.
+`sftp` works too. The server listens on `SSH_PORT` (default **22**; the module runs as root so privileged ports are fine).
+
+The username is always `root`. A custom username is not possible: Android has no account database SSH can use, so only
+names Android already knows (`root`, and the restricted `shell`) resolve. A client-side alias gives you a short command:
+
+    # ~/.ssh/config
+    Host phone
+        HostName 192.168.43.1
+        User root
+        IdentityFile ~/.ssh/<your key>
+    # then: ssh phone
 
 ### WireGuard
 Needs kernel support (the Moto G34's kernel has `CONFIG_WIREGUARD=y`). Put a standard `wg-quick`
@@ -195,10 +206,23 @@ for others, untested). Heavy dependencies bloat it (minidlna drags in ffmpeg, ~4
 - If real Termux is installed with `smbd` and `sshd`, its tree is used for those two; Transmission and Syncthing always run from the bundle.
 - Tested on: Moto G34 5G, Android 16, Magisk 30.7, run by hand from `/data/local/tmp` (not as an installed module, no reboot test).
 
-## Known issues (not yet fixed)
-- `lib.sh` `sms_send` checks the `service call isms` result with `grep 'Parcel(00000000'`, but the real output has a
-  tab (`Parcel(<TAB>00000000`), so a text that was actually accepted is logged as "failed" and not counted in the
-  hourly cap. Fix: match `Parcel(.*00000000`.
-- The watchdog gives up after 3 restarts in 15 min. If Android restarts its tether `dnsmasq` (it grabs port 53) while
-  unbound is restarting, unbound cannot bind and DNS stays down until `service.sh unbound` is run again.
-- Real-number SMS sending and WireGuard tunnels have not been tested end to end.
+## Hotspot behaviour (read this if clients can't connect)
+- `cmd wifi start-softap` starts the AP but Android only assigns an IPv4 address when *its* tethering is involved, so the
+  module treats "the interface exists" as "hotspot is up" and assigns `HOTSPOT_IP` itself. Never re-send start-softap
+  while one is pending: it restarts the AP.
+- Turning the hotspot on from Android Settings makes Android re-take the interface with its own random subnet and DHCP.
+  `nat.sh` notices within ~10 s, lifts the DHCP block meanwhile (so clients still get an address) and re-applies the
+  fixed subnet. The watchdog is the second line of defence; keep it unpaused.
+- **Idle shutdown:** `cmd wifi start-softap` builds its own hotspot settings and ignores the "turn off hotspot
+  automatically" switch in Android's UI, so Android switches the hotspot off 10 minutes after the last client leaves.
+  `nat.sh` sees the interface vanish and starts the hotspot again within ~15 s (nobody is connected at that point).
+  Rate-limited to once per 60 s. The panel's **Keep hotspot on** switch (flag file `/data/adb/hotspot_smb/hotspot.off`)
+  turns this off, so you can switch the hotspot off in Settings and have it stay off.
+
+## Known issues
+- SMS sending uses the root-only `ISms.sendTextForSubscriber` call (transaction 5, read from this phone's
+  `framework.jar`); it works on this Android 16 build and is not guaranteed elsewhere. Alerts are sanitised to printable
+  ASCII with `tr -cd ' -~'` (toybox `tr` does not understand `[:print:]`; that once turned every text into garbage).
+- WireGuard tunnels have not been tested end to end with a remote peer.
+- A pipe through the Windows `adb.exe` corrupts binary streams, so an SSH test via `ProxyCommand=adb ... nc` fails
+  during key exchange; test SSH over the hotspot or from the phone itself instead.

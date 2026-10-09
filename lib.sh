@@ -13,15 +13,16 @@ WD=/data/local/tmp/wd; mkdir -p "$WD"
 SERVICES="hotspot network samba transmission syncthing ssh unbound proxy panel wg"
 up() { ps -A 2>/dev/null | grep -qE "$1"; }
 upargs() { ps -A -o ARGS 2>/dev/null | grep -q "$1"; }
-ap_if() { ip -o -4 addr show 2>/dev/null | awk '$2 ~ /^(ap0|swlan0|wlan[12])$/ {print $2; exit}'; }
+ap_if() { for i in ap0 swlan0 wlan2 wlan1; do ip link show "$i" >/dev/null 2>&1 && { echo "$i"; return 0; }; done; return 1; }
 
 svc_enabled() {
   case "$1" in
-    samba|transmission|hotspot) return 0 ;;
-    network) [ -n "$HOTSPOT_IP" ] ;;
+    samba|transmission) return 0 ;;
+    hotspot) [ ! -e "$PERSIST/hotspot.off" ] ;;          # panel switch "keep hotspot on"
+    network) [ -n "$HOTSPOT_IP" ] && [ ! -e "$PERSIST/hotspot.off" ] ;;
     syncthing) [ "${ENABLE_SYNCTHING:-1}" = 1 ] ;;
     ssh) [ "${ENABLE_SSH:-1}" = 1 ] ;;
-    unbound) [ "${ENABLE_UNBOUND:-1}" = 1 ] && [ -n "$HOTSPOT_IP" ] ;;
+    unbound) [ "${ENABLE_UNBOUND:-0}" = 1 ] && [ -n "$HOTSPOT_IP" ] ;;
     proxy) [ "${ENABLE_PROXY:-1}" = 1 ] ;;
     panel) [ "${ENABLE_PANEL:-1}" = 1 ] ;;
     wg) [ "${ENABLE_WG:-0}" = 1 ] ;;
@@ -64,11 +65,12 @@ sms_budget_ok() {
 sms_send() { # <number> <text>
   [ -n "$1" ] || return 1
   sms_budget_ok || { echo "$(date '+%T') sms budget exhausted, dropped: $2" >> /data/local/tmp/watchdog.log; return 1; }
-  txt=$(printf '[Phone] %s' "$2" | tr '\n' ' ' | tr -cd '[:print:]' | cut -c1-155)
+  txt=$(printf '[Phone] %s' "$2" | tr '\n' ' ' | tr -cd ' -~' | cut -c1-155)
   sub=$(settings get global multi_sim_sms 2>/dev/null)
   case "$sub" in ''|null) sub=-1 ;; esac
   out=$(service call isms 5 i32 "$sub" s16 com.android.shell i32 -1 s16 "$1" i32 -1 s16 "$txt" i32 0 i32 0 i32 0 i64 0 2>&1)
-  if echo "$out" | grep -q 'Parcel(00000000'; then date +%s >> "$WD/sms_sent"; return 0; fi
+  echo "$(date '+%F %T') to ...$(echo "$1" | tail -c 5): $txt" >> /data/local/tmp/sms_sent.log
+  if echo "$out" | grep -qE 'Parcel\([[:space:]]*00000000'; then date +%s >> "$WD/sms_sent"; return 0; fi
   echo "$(date '+%T') sms send failed: $(echo "$out" | head -2 | tr '\n' ' ')" >> /data/local/tmp/watchdog.log; return 1
 }
 sms_alert() { for n in $SMS_TO; do sms_send "$n" "$1"; done; }

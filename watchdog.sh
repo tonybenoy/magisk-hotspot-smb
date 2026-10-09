@@ -38,7 +38,9 @@ while :; do
       echo 0 > "$WD/fail_$s"
     else
       n=$(( $(cat "$WD/fail_$s" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WD/fail_$s"
-      [ "$n" -ge 2 ] || continue                 # must be down for 2 checks in a row (~60 s)
+      need=2                                     # down for 2 checks in a row (~60 s) ...
+      case "$s" in hotspot|network) need=4 ;; esac   # ... but the hotspot first gets ~2 min for nat.sh's own 15 s keep-on restart
+      [ "$n" -ge "$need" ] || continue
       if [ ! -e "$WD/alert_$s" ]; then touch "$WD/alert_$s"; log "$s DOWN"; sms_alert "DOWN: $s. Restarting."; fi
       if restart_allowed "$s"; then
         date +%s >> "$WD/tries_$s"; log "restarting $s"; svc_restart "$s"; echo 0 > "$WD/fail_$s"

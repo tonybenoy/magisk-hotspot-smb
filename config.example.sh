@@ -33,7 +33,7 @@ TR_DOWNLOAD_DIR="/sdcard/Download/torrents"
 # ---- Optional services (1 = start at boot) ----
 # SSH: key login only, as root. Public keys go in /data/adb/hotspot_smb/authorized_keys
 ENABLE_SSH=1
-SSH_PORT="8022"
+SSH_PORT="22"
 
 # Syncthing web UI: http://<ip>:8384 or http://sync.lan
 ENABLE_SYNCTHING=1
@@ -45,7 +45,8 @@ ST_PASS="change-me"
 ENABLE_WG=0
 WG_CONF="/data/adb/hotspot_smb/wg0.conf"
 
-# ENABLE_UNBOUND=1                # local DNS (*.lan)
+# ENABLE_UNBOUND=0               # 1 = local DNS so torrent.lan / sync.lan / panel.lan resolve (off by default: Android's
+#                                 # tether dnsmasq fights it for port 53). Off: clients get 1.1.1.1/8.8.8.8, use IPs.
 # ENABLE_PROXY=1                  # nginx on :80 -> torrent.lan, sync.lan, panel.lan
 
 # ---- Web panel: http://panel.lan or http://<ip>:8080 ----
